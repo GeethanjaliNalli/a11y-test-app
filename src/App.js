@@ -33,6 +33,14 @@ function App() {
 
       {/* ❌ ARIA misuse */}
       <div role="button">Fake button</div>
+
+      {/* ❌ Understandable issue */}
+      <form>
+        <input type="text" required />
+      </form>
+
+      {/* ❌ Robust issue */}
+      <div aria-unknown="true">Invalid ARIA</div>
     </div>
   );
 }
