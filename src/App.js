@@ -1,147 +1,366 @@
-import React from "react"
-import { Card, CardContent, CardFooter } from "@/ShadcnComponents/ui/card"
-import { Button } from "@/ShadcnComponents/ui/button"
-import { HelpCircle } from "lucide-react"
-import BackgroundImage from "../../../assets/AccessibilityTestingImages/Background.png";
-import TSGIcon from "../../../assets/AccessibilityTestingImages/TestStrategyGeneration.svg";
-import SCRIcon from "../../../assets/AccessibilityTestingImages/StaticCodeRun.svg";
-import USVIcon from "../../../assets/AccessibilityTestingImages/UserFlowValidation.svg";
+//react hooks
+import { useState, useContext } from "react";
+import { useNavigate } from "react-router-dom";
 
-interface Props {
-    handleAddNewDetailViewTabRender: (
-        id: string,
-        tabName: string,
-        tabsetId: string,
-        eventData: any,
-        componentName: string
-    ) => void;
-}
 
-const AccessibilityTestingLandingPage: React.FC<Props> = ({ handleAddNewDetailViewTabRender }) => {
+//mui components
+import {
+    Box,
+    Typography,
+    TextField,
+    Radio,
+    RadioGroup,
+    FormControlLabel,
+    FormControl,
+    Button,
+    Paper
+} from "@mui/material";
 
-    const handleWorkFlow = () => {
-        handleAddNewDetailViewTabRender(
-            '767a0663-aeda-4a83-8667-9b9f016ee742',
-            'Static Code Run',
-            '06c6b68f-e212-4350-b1b7-0efd5b8c3234',
-            '',
-            'ConnectRepository'
-        );
+
+//mui icons
+import { ReactComponent as UploadIcon } from "../../../images/uploadIcon.svg";
+
+
+//custom components
+import { sastPlan } from "../../../services/webServices";
+import { handleProgressBar } from "../../custom-components/ProgressBar/ProgressBarWithAPI";
+import { LoadingModalContext } from "../../main-pages/ServicePage";
+
+
+//doc related libraries
+import * as pdfjsLib from "pdfjs-dist";
+import mammoth from "mammoth";
+pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.js`;
+
+
+export default function SASTForm() {
+
+    const { setLoadingState } = useContext(LoadingModalContext);
+    const navigate = useNavigate();
+    const [selectedDoc, setSelectedDoc] = useState("");
+    const [submitted, setSubmitted] = useState("");
+    const [errors, setErrors] = useState({});
+    const [loC, setLoC] = useState("");
+    const [clientName, setClientName] = useState("");
+    const [appName, setAppName] = useState("");
+    const [extractedText, setExtractedText] = useState({
+        fd: "",
+        tmd: "",
+        srq: "",
+        srec: "",
+    });
+    const [files, setFiles] = useState({
+        fd: null,
+        tmd: null,
+        srq: null,
+        srec: null,
+    });
+    const uploadTextMap = {
+        fd: "Functional Modules",
+        tmd: "Threat Modelling",
+        srq: "Security Requirements",
+        srec: "Security Recommendations",
+    };
+
+
+    //file upload
+    const handleFileUpload = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const allowedExtensions = ["pdf", "doc", "docx"];
+        const fileExt = file.name.split(".").pop().toLowerCase();
+        if (!allowedExtensions.includes(fileExt)) {
+            alert("Invalid file type. Only PDF, DOC, and DOCX files are allowed.");
+            e.target.value = "";
+            return;
+        }
+        let textContent = "";
+        try {
+            if (fileExt === "pdf") {
+                textContent = await convertPdfToText(file);
+            } else if (fileExt === "docx" || fileExt === "doc") {
+                textContent = await convertDocxToText(file);
+            }
+        } catch (err) {
+            console.error("Text extraction failed:", err);
+            alert("Unable to read the document. Please upload a valid PDF/DOC/DOCX file.");
+            return;
+        }
+        setFiles((prev) => ({
+            ...prev,
+            [selectedDoc]: file,
+        }));
+        setExtractedText((prev) => ({
+            ...prev,
+            [selectedDoc]: textContent,
+        }));
+
+        setErrors((prev) => ({
+            ...prev,
+            [selectedDoc]: "",
+        }));
+    };
+
+
+    // Convert PDF file => text
+    async function convertPdfToText(file) {
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+        let text = "";
+        for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const content = await page.getTextContent();
+            text += content.items.map(item => item.str).join(" ") + "\n";
+        }
+        return text;
     }
 
-    const handleTestStrategyWorkFlow = () => {
-        handleAddNewDetailViewTabRender(
-            '2feee8b8-d198-45d7-bf6d-dfe2aceff4cc',
-            'Test Strategy Generation',
-            '06c6b68f-e212-4350-b1b7-0efd5b8c3234',
-            '',
-            'UserStoryInput'
-        );
+
+    // Convert DOCX => text
+    async function convertDocxToText(file) {
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await mammoth.extractRawText({ arrayBuffer });
+        return result.value;
     }
+
+
+    //handle submit
+    const handleSubmit = async () => {
+        setSubmitted(true);
+        const newErrors = {};
+        if (!loC) newErrors.loC = "Number of lines of code is required.";
+        if (!clientName) newErrors.clientName = "Client name is required.";
+        if (!appName) newErrors.appName = "Application name is required.";
+        setErrors(newErrors);
+        const missingUploads =
+            !files.fd || !files.tmd || !files.srq || !files.srec;
+
+        if (missingUploads) {
+            alert("Please upload all the required documents.");
+            return; 
+        }
+        if (Object.keys(newErrors).length > 0) {
+            return;
+        }
+        const inputData = {
+            clientName,
+            appName,
+            loC
+        };
+        let progressHandler;
+        try {
+            progressHandler =
+                handleProgressBar({ setLoadingState, totalDurationMs: 35000 });
+            progressHandler.start("Generating SAST Test Plan");
+            const securityTestPlanResponse = await sastPlan({
+                formData: inputData,
+                funcMod: extractedText.fd,
+                securityReq: extractedText.tmd,
+                securityRecom: extractedText.srq,
+                threatM: extractedText.srec,
+            });
+            const securityTestPlan = securityTestPlanResponse.data;
+            await progressHandler.finishAndClose();
+            navigate("/dashboard/security-testing/sast-test-plan", { state: { sastTestPlan: securityTestPlan } });
+        } catch (error) {
+            console.error("Error generating security plan:", error);
+            setLoadingState({
+                open: false,
+                message: "",
+                progress: null,
+            });
+            alert("An error occurred while generating the security test plan.");
+
+        } finally {
+            if (progressHandler) {
+                progressHandler.stop();
+            }
+            setLoadingState({
+                open: false,
+                message: "",
+                progress: null,
+            });
+        }
+    };
+
+
 
     return (
-        <div
-            className="flex flex-col items-center px-4 py-4 w-full h-full bg-no-repeat bg-center bg-cover"
-            style={{
-                backgroundImage: `url(${BackgroundImage})`,
-                backgroundSize: "500px 400px"
-            }}
-        >
+        <Box sx={{ width: "1100px", mx: "auto", p: 3 }}>
+            
+            {/* SECTION 1 */}
+            <Paper sx={{ p: 3, mb: 4 }} elevation={0}>
+                <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
+                    Static Application Security Testing (SAST)
+                </Typography>
 
-            {/* Title */}
-            <div className="text-center mb-10">
-                <h1 className="text-5xl font-semibold text-gray-900 mb-4 mt-10 ">
-                    Accessibility Testing
-                </h1>
+                <TextField
+                    fullWidth
+                    label="Number of Lines of Code"
+                    variant="outlined"
+                    sx={{ mb: 3 }}
+                    required
+                    value={loC}
+                    onChange={(e) => setLoC(e.target.value)}
+                    error={!!errors.loC}
+                    helperText={errors.loC}
+                />
 
-                <p className="text-gray-900 text-lg max-w-2xl mx-auto"
-                    style={{ fontFamily: "Manrope, sans-serif" }}>
-                    Achieving true digital inclusion so all users can access and
-                    interact with the product.
-                </p>
-            </div>
+                <TextField
+                    fullWidth
+                    label="Programming Languages Used"
+                    variant="outlined"
+                    sx={{ mb: 3 }}
+                />
 
-            {/* Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-6xl w-full">
+                <Typography sx={{ mb: 1 }}>
+                    Do you use any third-party libraries or frameworks?
+                </Typography>
 
-                {/* Card 1 */}
-                <Card className="text-center shadow-sm hover:shadow-md transition">
-                    <CardContent className="pt-10 pb-6 flex flex-col items-center">
+                <RadioGroup row>
+                    <FormControlLabel value="yes" control={<Radio />} label="Yes" />
+                    <FormControlLabel value="no" control={<Radio />} label="No" />
+                </RadioGroup>
+            </Paper>
 
-                        <img
-                            src={TSGIcon}
-                            className="w-20 mb-10"
-                        />
+            {/* SECTION 2 */}
+            <Paper sx={{ p: 3, mb: 4 }} elevation={0}>
+                <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
+                    Upload your documents*
+                </Typography>
 
-                        <Button
-                            variant="link"
-                            className="text-black text-xl"
-                            onClick={handleTestStrategyWorkFlow}
-                        >
-                            Test Strategy Generation
-                        </Button>
+                <FormControl sx={{ mb: 2 }}>
+                    <RadioGroup
+                        row
+                        value={selectedDoc}
+                        onChange={(e) => setSelectedDoc(e.target.value)}
+                    >
+                        <FormControlLabel sx={{ mr: 5 }} value="fd" control={<Radio />} label="Functional Modules" />
+                        <FormControlLabel sx={{ mr: 5 }} value="tmd" control={<Radio />} label="Threat Modelling" />
+                        <FormControlLabel sx={{ mr: 5 }} value="srq" control={<Radio />} label="Security Requirements" />
+                        <FormControlLabel value="srec" control={<Radio />} label="Security Recommendations" />
+                    </RadioGroup>
+                </FormControl>
+                <Box
+                    sx={{
+                        border: "2px dashed #90caf9",
+                        background: "#e3f2fd",
+                        p: 4,
+                        borderRadius: 2,
+                        textAlign: "center",
+                    }}
+                >
+                    {/* File list always stays */}
+                    <Box sx={{ mt: 2, mb: 2 }}>
+                        {files.fd && (
+                            <Typography sx={{ fontSize: "13px" }}>
+                                Functional Modules: {files.fd.name}
+                            </Typography>
+                        )}
+                        {files.tmd && (
+                            <Typography sx={{ fontSize: "13px" }}>
+                                Threat Modelling: {files.tmd.name}
+                            </Typography>
+                        )}
+                        {files.srq && (
+                            <Typography sx={{ fontSize: "13px" }}>
+                                Security Requirements: {files.srq.name}
+                            </Typography>
+                        )}
+                        {files.srec && (
+                            <Typography sx={{ fontSize: "13px" }}>
+                                Security Recommendations: {files.srec.name}
+                            </Typography>
+                        )}
+                    </Box>
 
-                        <p className="text-gray-500 text-sm">
-                            Define standards and approach
-                        </p>
-                    </CardContent>
-                </Card>
+                    {/* Only hide the upload input after all four docs uploaded */}
+                    {!(
+                        files.fd &&
+                        files.tmd &&
+                        files.srq &&
+                        files.srec
+                    ) && (
+                            <>
+                                <Box
+                                    sx={{
+                                        display: "flex",
+                                        justifyContent: "center",
+                                        alignItems: "center",
+                                        gap: 1,
+                                        mb: 1,
+                                    }}
+                                >
+                                    <UploadIcon fontSize="medium" sx={{ color: "#1976d2" }} />
 
-                {/* Card 2 */}
-                <Card className="text-center shadow-sm hover:shadow-md transition">
-                    <CardContent className="pt-10 pb-6 flex flex-col items-center">
+                                    <Typography sx={{ fontSize: "15px", fontWeight: 500 }}>
+                                        Import/Upload {uploadTextMap[selectedDoc]} Document
+                                    </Typography>
+                                </Box>
+                                <Typography sx={{ fontSize: "13px", color: "gray", mb: 2 }}>
+                                    Upload pdf or doc files
+                                </Typography>
 
-                        <img
-                            src={SCRIcon}
-                            className="w-20 mb-10"
-                        />
+                                <Button variant="contained" component="label">
+                                    Choose File
+                                    <input
+                                        hidden
+                                        type="file"
+                                        accept="application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.pdf,.doc,.docx"
+                                        onChange={handleFileUpload}
+                                    />
+                                </Button>
+                            </>
+                        )}
+                </Box>
+            </Paper>
 
-                        <Button
-                            variant="link"
-                            className="text-black text-xl"
-                            onClick={handleWorkFlow}
-                        >
-                            Static Code Run
-                        </Button>
 
-                        <p className="text-gray-500 text-sm">
-                            Run automated accessibility code scans
-                        </p>
-                    </CardContent>
-                </Card>
+            {/* SECTION 3 */}
+            <Paper sx={{ p: 3, mb: 4 }} elevation={0}>
+                <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
+                    Additional Information
+                </Typography>
 
-                {/* Card 3 */}
-                <Card className="text-center shadow-sm hover:shadow-md transition">
-                    <CardContent className="pt-10 pb-6 flex flex-col items-center">
+                <TextField
+                    fullWidth
+                    label="Client Name"
+                    variant="outlined"
+                    sx={{ mb: 3 }}
+                    required
+                    value={clientName}
+                    onChange={(e) => setClientName(e.target.value)}
+                    error={!!errors.clientName}
+                    helperText={errors.clientName}
+                />
 
-                        <img
-                            src={USVIcon}
-                            className="w-20 mb-10"
-                        />
+                <TextField
+                    fullWidth
+                    label="Application Name"
+                    variant="outlined"
+                    required
+                    value={appName}
+                    onChange={(e) => setAppName(e.target.value)}
+                    error={!!errors.appName}
+                    helperText={errors.appName}
+                />
+            </Paper>
 
-                        <Button
-                            variant="link"
-                            className="text-black text-xl"
-                        >
-                            User Flow validation
-                        </Button>
-
-                        <p className="text-gray-500 text-sm">
-                            Verify if user interactions are accessible
-                        </p>
-                    </CardContent>
-                </Card>
-
-            </div>
-
-            {/* Help */}
-            <div className="mt-10 flex items-center gap-2 text-[#0094FB] cursor-pointer hover:underline">
-                <span>Need Help</span>
-                <HelpCircle size={16} />
-            </div>
-
-        </div>
-    )
+            <Box textAlign="right">
+                <Button
+                    variant="contained"
+                    sx={{
+                        px: 4,
+                        background: "#0094f5",
+                        textTransform: "none",
+                        fontSize: "16px",
+                    }}
+                    onClick={handleSubmit}
+                >
+                    Submit
+                </Button>
+            </Box>
+        </Box>
+    );
 }
-
-export default AccessibilityTestingLandingPage
